@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Patch Attention</title>
+<style>
+  :root {
+    --bg: #f6f5f1; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70; --line: #dedcd5;
+    --accent: #e63946; --chip: #efede7; --chip-on: #1d1d1f; --chip-on-ink: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141416; --panel: #1d1d20; --ink: #ececee; --muted: #9a9aa2; --line: #2e2e33;
+      --accent: #ff5d6c; --chip: #26262b; --chip-on: #ececee; --chip-on-ink: #141416;
+      color-scheme: dark;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1080px; margin: 0 auto; padding: 32px 16px 48px; }
+  h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .lede { color: var(--muted); margin: 0 0 24px; max-width: 70ch; }
+  .layout { display: grid; grid-template-columns: minmax(0, 420px) minmax(0, 1fr); gap: 28px; }
+  @media (max-width: 820px) { .layout { grid-template-columns: 1fr; } }
+  .stage { position: relative; width: 100%; aspect-ratio: 1; border-radius: 10px; overflow: hidden;
+           background: #000; cursor: crosshair; }
+  .stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; }
+  .caption { margin-top: 10px; font-size: 14px; color: var(--muted); min-height: 1.5em; }
+  .caption b { color: var(--ink); }
+  .wrong { color: var(--accent); }
+  .group { margin-bottom: 18px; }
+  .group h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
+              margin: 0 0 8px; font-weight: 600; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { border: 0; background: var(--chip); color: var(--ink); border-radius: 999px; padding: 5px 12px;
+          font: inherit; font-size: 13px; cursor: pointer; }
+  .chip[aria-pressed="true"] { background: var(--chip-on); color: var(--chip-on-ink); }
+  .thumbs { display: grid; grid-template-columns: repeat(auto-fill, minmax(52px, 1fr)); gap: 6px; }
+  .thumb { border: 2px solid transparent; border-radius: 6px; padding: 0; background: none; cursor: pointer; }
+  .thumb img { display: block; width: 100%; image-rendering: pixelated; border-radius: 4px; }
+  .thumb[aria-pressed="true"] { border-color: var(--accent); }
+  .strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 8px; }
+  .strip figure { margin: 0; cursor: pointer; }
+  .strip canvas { width: 100%; aspect-ratio: 1; border-radius: 6px; image-rendering: pixelated;
+                  outline: 2px solid transparent; display: block; }
+  .strip figure.on canvas { outline-color: var(--accent); }
+  .strip figcaption { font-size: 12px; color: var(--muted); text-align: center; margin-top: 3px; }
+  .note { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+          font-size: 14px; color: var(--muted); }
+  .empty { padding: 40px; text-align: center; background: var(--panel); border: 1px dashed var(--line);
+           border-radius: 10px; }
+  code { font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Where does each patch look?</h1>
+  <p class="lede">A small Vision Transformer, trained from scratch on CIFAR-10, cuts each 32&times;32 image into
+    a grid of square patches. Move the pointer over a patch to see how strongly that patch attends to every
+    other patch. Use the layer and head controls to compare depths and heads.</p>
+  <div id="app"></div>
+</main>
+<script src="data.js"></script>
+<script>
+"use strict";
+const D = window.ATTENTION_DATA;
+const app = document.getElementById("app");
+const CLS = -1;
+
+if (!D) {
+  app.innerHTML = `<div class="empty">No attention data yet. Train Project 1, then run
+    <code>uv run python projects/02_attention_maps/draw_attention.py</code> to write <code>demo/data.js</code>.</div>`;
+} else {
+  start();
+}
+
+function start() {
+  const T = D.tokens, HM = D.heads + 1;
+  const decoded = D.images.map(im => Uint8Array.from(atob(im.attention), c => c.charCodeAt(0)));
+  const pictures = D.images.map(im => { const img = new Image(); img.src = im.png; return img; });
+  const state = { image: 0, layer: D.layers - 1, head: D.heads, query: CLS, pinned: false };
+
+  app.innerHTML = `
+    <div class="layout">
+      <div>
+        <div class="stage" id="stage"><canvas id="photo"></canvas><canvas id="heat"></canvas></div>
+        <div class="caption" id="caption"></div>
+      </div>
+      <div>
+        <div class="group"><h2>Image</h2><div class="thumbs" id="thumbs"></div></div>
+        <div class="group"><h2>Layer</h2><div class="chips" id="layers"></div></div>
+        <div class="group"><h2>Head</h2><div class="chips" id="heads"></div></div>
+        <div class="group"><h2>Same query, every layer</h2><div class="strip" id="strip"></div></div>
+        <p class="note">Bright means strong attention. Each map is scaled to its own maximum, so compare
+          shapes, not brightness, between maps. Off the image, the query is the <b>CLS</b> token, which the
+          classifier reads. Click a patch to pin it.</p>
+      </div>
+    </div>`;
+
+  const $ = id => document.getElementById(id);
+  const photo = $("photo"), heat = $("heat"), stage = $("stage");
+  photo.width = photo.height = heat.width = heat.height = D.grid * 8;
+
+  D.images.forEach((im, i) => {
+    const b = document.createElement("button");
+    b.className = "thumb"; b.title = D.classes[im.label];
+    b.innerHTML = `<img alt="${D.classes[im.label]}" src="${im.png}">`;
+    b.onclick = () => { state.image = i; render(); };
+    $("thumbs").append(b);
+  });
+  chipRow($("layers"), D.layers, i => `L${i}`, () => state.layer, v => state.layer = v);
+  chipRow($("heads"), HM, i => i === D.heads ? "mean" : `h${i}`, () => state.head, v => state.head = v);
+
+  const strip = [];
+  $("strip").style.gridTemplateColumns = `repeat(${D.layers}, minmax(0, 1fr))`;  // one row, every layer
+  for (let l = 0; l < D.layers; l++) {
+    const f = document.createElement("figure");
+    const c = document.createElement("canvas"); c.width = c.height = D.grid * 8;
+    f.append(c); f.insertAdjacentHTML("beforeend", `<figcaption>layer ${l}</figcaption>`);
+    f.onclick = () => { state.layer = l; render(); };
+    $("strip").append(f); strip.push({ f, c });
+  }
+
+  stage.addEventListener("pointermove", e => { if (!state.pinned) { state.query = patchAt(e); render(); } });
+  stage.addEventListener("pointerleave", () => { if (!state.pinned) { state.query = CLS; render(); } });
+  stage.addEventListener("click", e => {
+    const q = patchAt(e);
+    state.pinned = !(state.pinned && q === state.query);
+    state.query = q; render();
+  });
+  pictures.forEach(p => p.addEventListener("load", render));
+
+  function patchAt(e) {
+    const r = stage.getBoundingClientRect();
+    const col = Math.min(D.grid - 1, Math.floor((e.clientX - r.left) / r.width * D.grid));
+    const row = Math.min(D.grid - 1, Math.floor((e.clientY - r.top) / r.height * D.grid));
+    return row * D.grid + col;
+  }
+
+  function chipRow(host, n, label, get, set) {
+    for (let i = 0; i < n; i++) {
+      const b = document.createElement("button");
+      b.className = "chip"; b.textContent = label(i);
+      b.onclick = () => { set(i); render(); };
+      host.append(b);
+    }
+    host.sync = () => [...host.children].forEach((b, i) => b.setAttribute("aria-pressed", i === get()));
+  }
+
+  function row(layer) {
+    const token = state.query === CLS ? 0 : state.query + 1;
+    const base = ((layer * HM + state.head) * T + token) * T;
+    return decoded[state.image].subarray(base + 1, base + T);
+  }
+
+  function paint(canvas, values, picture, withPhoto) {
+    const ctx = canvas.getContext("2d"), s = canvas.width / D.grid;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (withPhoto) { ctx.imageSmoothingEnabled = false; ctx.drawImage(picture, 0, 0, canvas.width, canvas.height); }
+    let peak = 1; for (const v of values) peak = Math.max(peak, v);
+    for (let p = 0; p < values.length; p++) {
+      const t = values[p] / peak;
+      ctx.fillStyle = `rgba(${heatColor(t)},${0.15 + 0.7 * t})`;
+      ctx.fillRect((p % D.grid) * s, Math.floor(p / D.grid) * s, s, s);
+    }
+    if (state.query !== CLS) {
+      ctx.strokeStyle = "#ffffff"; ctx.lineWidth = Math.max(1, s / 8);
+      ctx.strokeRect((state.query % D.grid) * s, Math.floor(state.query / D.grid) * s, s, s);
+    }
+  }
+
+  function heatColor(t) {
+    const stops = [[0, 0, 4], [120, 28, 109], [237, 105, 37], [252, 255, 164]];
+    const x = t * (stops.length - 1), i = Math.min(stops.length - 2, Math.floor(x)), f = x - i;
+    return stops[i].map((a, k) => Math.round(a + (stops[i + 1][k] - a) * f)).join(",");
+  }
+
+  function render() {
+    const im = D.images[state.image], picture = pictures[state.image];
+    const pctx = photo.getContext("2d"); pctx.imageSmoothingEnabled = false;
+    pctx.drawImage(picture, 0, 0, photo.width, photo.height);
+    paint(heat, row(state.layer), picture, false);
+    strip.forEach(({ f, c }, l) => { paint(c, row(l), picture, true); f.classList.toggle("on", l === state.layer); });
+    [...$("thumbs").children].forEach((b, i) => b.setAttribute("aria-pressed", i === state.image));
+    $("layers").sync(); $("heads").sync();
+    const q = state.query === CLS ? "<b>CLS</b> token"
+      : `patch <b>(${Math.floor(state.query / D.grid)}, ${state.query % D.grid})</b>${state.pinned ? " (pinned)" : ""}`;
+    const ok = im.pred === im.label;
+    $("caption").innerHTML = `Query: ${q} &middot; layer ${state.layer} &middot; `
+      + `${state.head === D.heads ? "mean of heads" : "head " + state.head}<br>True <b>${D.classes[im.label]}</b>, `
+      + `predicted <b class="${ok ? "" : "wrong"}">${D.classes[im.pred]}</b>`;
+  }
+  render();
+}
+</script>
+</body>
+</html>
